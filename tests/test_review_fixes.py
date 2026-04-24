@@ -115,48 +115,6 @@ class ReviewFixTests(unittest.TestCase):
         self.assertEqual(entry["best_method"], "anchor")
         self.assertEqual(entry["best_score"], 0.41)
 
-    def test_resolve_epub_match_overlaps_splits_broader_highlight(self):
-        state = make_state("alpha beta gamma delta")
-        yellow = rmha.Highlight(
-            color="yellow", text="", raw_text="", is_image=False,
-            rm_page=0, rm_bbox=(0, 0, 0, 0),
-        )
-        green = rmha.Highlight(
-            color="green", text="", raw_text="", is_image=False,
-            rm_page=0, rm_bbox=(0, 0, 0, 0),
-        )
-        beta_start = state.norm_text.index("beta")
-        gamma_end = state.norm_text.index(" delta")
-        matches = [
-            rmha.EpubMatch(
-                highlight=yellow,
-                spine_index=0,
-                xhtml_path="test.xhtml",
-                start=0,
-                end=len(state.char_map),
-                matched_text="alpha beta gamma delta",
-                section_label="test",
-            ),
-            rmha.EpubMatch(
-                highlight=green,
-                spine_index=0,
-                xhtml_path="test.xhtml",
-                start=beta_start,
-                end=gamma_end,
-                matched_text="beta gamma",
-                section_label="test",
-            ),
-        ]
-        resolved = rmha._resolve_epub_match_overlaps(matches, lambda _spine: state)
-        result = [(m.highlight.color, m.matched_text) for m in resolved]
-        self.assertEqual(result, [
-            ("yellow", "alpha"),
-            ("green", "beta gamma"),
-            ("yellow", "delta"),
-        ])
-        for left, right in zip(resolved, resolved[1:]):
-            self.assertLessEqual(left.end, right.start)
-
     def test_remove_empty_highlight_spans_preserves_text(self):
         tree = rmha.etree.fromstring(
             b'<html xmlns="http://www.w3.org/1999/xhtml"><body><p>'
@@ -168,6 +126,60 @@ class ReviewFixTests(unittest.TestCase):
         self.assertEqual("".join(tree.itertext()), "A B")
         self.assertFalse(tree.xpath(
             '//*[contains(concat(" ", normalize-space(@class), " "), " rm-highlight ")]'
+        ))
+
+    def test_epub_wrap_order_keeps_specific_color_visible(self):
+        state = make_state("alpha beta gamma")
+        yellow = rmha.Highlight(
+            color="yellow", text="", raw_text="", is_image=False,
+            rm_page=0, rm_bbox=(0, 0, 0, 0),
+        )
+        green = rmha.Highlight(
+            color="green", text="", raw_text="", is_image=False,
+            rm_page=0, rm_bbox=(0, 0, 0, 0),
+        )
+        beta_start = state.norm_text.index("beta")
+        beta_end = beta_start + len("beta")
+        matches = [
+            rmha.EpubMatch(
+                highlight=yellow,
+                spine_index=0,
+                xhtml_path="test.xhtml",
+                start=0,
+                end=len(state.char_map),
+                matched_text="alpha beta gamma",
+                section_label="test",
+            ),
+            rmha.EpubMatch(
+                highlight=green,
+                spine_index=0,
+                xhtml_path="test.xhtml",
+                start=beta_start,
+                end=beta_end,
+                matched_text="beta",
+                section_label="test",
+            ),
+        ]
+
+        for match in sorted(matches, key=rmha._epub_wrap_order_key):
+            if state.dirty:
+                rmha._refresh_spine_state(state)
+            start_node, start_attr, start_local = state.char_map[match.start]
+            end_node, end_attr, end_local = state.char_map[match.end - 1]
+            self.assertTrue(rmha._wrap_range_with_span(
+                state.tree,
+                start_node, start_attr, start_local,
+                end_node, end_attr, end_local + 1,
+                match.highlight.color,
+            ))
+            state.dirty = True
+
+        green_span = state.tree.xpath(
+            '//*[contains(concat(" ", normalize-space(@class), " "), " rm-highlight-green ")]'
+        )[0]
+        self.assertIn("rm-highlight-yellow", green_span.getparent().get("class", ""))
+        self.assertFalse(green_span.xpath(
+            './/*[contains(concat(" ", normalize-space(@class), " "), " rm-highlight-yellow ")]'
         ))
 
 

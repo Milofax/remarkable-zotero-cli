@@ -1859,69 +1859,6 @@ def _text_from_state_range(state: EpubSpineState, start: int, end: int) -> str:
     return "".join(pieces).strip()
 
 
-def _subtract_intervals(start: int, end: int, blockers: list[tuple[int, int]]) -> list[tuple[int, int]]:
-    segments = [(start, end)]
-    for block_start, block_end in blockers:
-        next_segments = []
-        for seg_start, seg_end in segments:
-            if block_end <= seg_start or block_start >= seg_end:
-                next_segments.append((seg_start, seg_end))
-                continue
-            if seg_start < block_start:
-                next_segments.append((seg_start, block_start))
-            if block_end < seg_end:
-                next_segments.append((block_end, seg_end))
-        segments = next_segments
-        if not segments:
-            break
-    return [(seg_start, seg_end) for seg_start, seg_end in segments if seg_end > seg_start]
-
-
-def _resolve_epub_match_overlaps(matches: list[EpubMatch], get_state) -> list[EpubMatch]:
-    """Split broad EPUB highlights around more specific overlapping highlights.
-
-    reMarkable exports can contain adjacent color changes inside one visually
-    continuous passage. Matching the broad passage first would create nested
-    spans, so shorter/specific matches reserve their ranges and broader matches
-    are split around them.
-    """
-    resolved_by_spine: dict[int, list[EpubMatch]] = {}
-    for match in sorted(matches, key=lambda m: (m.spine_index, m.end - m.start, m.start, m.end)):
-        spine_matches = resolved_by_spine.setdefault(match.spine_index, [])
-        if any(
-            existing.start == match.start
-            and existing.end == match.end
-            and existing.highlight.color == match.highlight.color
-            for existing in spine_matches
-        ):
-            continue
-        blockers = [
-            (existing.start, existing.end)
-            for existing in spine_matches
-            if existing.start < match.end and match.start < existing.end
-        ]
-        segments = _subtract_intervals(match.start, match.end, blockers)
-        state = get_state(match.spine_index)
-        for seg_start, seg_end in segments:
-            text = _text_from_state_range(state, seg_start, seg_end)
-            if not text:
-                continue
-            spine_matches.append(EpubMatch(
-                highlight=match.highlight,
-                spine_index=match.spine_index,
-                xhtml_path=match.xhtml_path,
-                start=seg_start,
-                end=seg_end,
-                matched_text=text,
-                section_label=match.section_label,
-            ))
-    return [
-        match
-        for spine_index in sorted(resolved_by_spine)
-        for match in sorted(resolved_by_spine[spine_index], key=lambda m: (m.start, m.end))
-    ]
-
-
 def _remove_empty_highlight_spans(tree) -> int:
     removed = 0
     spans = tree.xpath('//*[contains(concat(" ", normalize-space(@class), " "), " rm-highlight ")]')
@@ -1941,6 +1878,10 @@ def _remove_empty_highlight_spans(tree) -> int:
         parent.remove(span)
         removed += 1
     return removed
+
+
+def _epub_wrap_order_key(match: EpubMatch):
+    return (-(match.end - match.start), match.start, match.end)
 
 
 NSMAP = {
@@ -2393,8 +2334,6 @@ def annotate_epub(original_epub: str, highlights: list[Highlight],
         last_location = (best_state.spine_index, best_match.start)
         stats["matched"] += 1
 
-    pending_matches = _resolve_epub_match_overlaps(pending_matches, get_state)
-
     matches_by_spine: dict[int, list[EpubMatch]] = {}
     for match in pending_matches:
         matches_by_spine.setdefault(match.spine_index, []).append(match)
@@ -2405,7 +2344,9 @@ def annotate_epub(original_epub: str, highlights: list[Highlight],
     # text positions.
     for si in sorted(matches_by_spine):
         spine_matches = matches_by_spine[si]
-        for match in sorted(spine_matches, key=lambda m: (m.start, m.end), reverse=True):
+        # Broader ranges are wrapped first so a contained, more specific color
+        # remains visually on top, e.g. a green term inside a yellow sentence.
+        for match in sorted(spine_matches, key=_epub_wrap_order_key):
             state = get_state(si)
             if match.end - 1 >= len(state.char_map):
                 raise RuntimeError(

@@ -79,14 +79,22 @@ fitz.TOOLS.mupdf_display_errors(False)
 # KONSTANTEN
 # ============================================================
 
-HIGHLIGHT_COLORS = {
-    "yellow": ((1.0, 0.99, 0.38), (0.05, 0.05, 0.10)),
-    "pink":   ((1.0, 0.33, 0.81), (0.05, 0.05, 0.10)),
+RM_HIGHLIGHT_COLOR_PALETTE = {
+    # reMarkable exports use slightly muted fills, while our generated
+    # annotations use brighter colors. Keep both families in the classifier so
+    # exports from different versions do not collapse to the wrong color.
+    "yellow": [(1.0, 0.929, 0.459), (1.0, 0.99, 0.38)],
+    "green":  [(0.675, 1.0, 0.522), (0.5, 1.0, 0.5)],
+    "pink":   [(0.949, 0.62, 1.0), (1.0, 0.33, 0.81)],
+    "orange": [(1.0, 0.765, 0.549), (0.949, 0.62, 0.459)],
+    "blue":   [(0.5, 0.7, 1.0)],
+    "red":    [(1.0, 0.4, 0.4)],
 }
 ANNOT_COLOR_MAP = {
     "yellow": (1.0, 0.99, 0.38),
     "pink":   (1.0, 0.33, 0.81),
     "green":  (0.5, 1.0, 0.5),
+    "orange": (1.0, 0.68, 0.30),
     "blue":   (0.5, 0.7, 1.0),
     "red":    (1.0, 0.4, 0.4),
 }
@@ -95,6 +103,7 @@ CALIBRE_COLOR_MAP = {
     "yellow": "yellow",
     "pink":   "pink",
     "green":  "green",
+    "orange": "yellow",
     "blue":   "blue",
     "red":    "purple",
 }
@@ -103,6 +112,7 @@ CSS_HIGHLIGHT_STYLE = {
     "yellow": "background-color: rgba(255,245,120,0.6);",
     "pink":   "background-color: rgba(255,170,210,0.5);",
     "green":  "background-color: rgba(170,240,170,0.5);",
+    "orange": "background-color: rgba(255,190,120,0.5);",
     "blue":   "background-color: rgba(170,200,255,0.5);",
     "red":    "background-color: rgba(255,170,170,0.5);",
 }
@@ -112,6 +122,10 @@ LINE_GAP_TOLERANCE = 8.0
 # 0.15 keeps those partial hits while still rejecting most neighboring words.
 # See tests for footnote-adjacent / partial-overlap edge cases.
 WORD_HIT_OVERLAP_THRESHOLD = 0.15
+# Tiny colored seams can appear where two reMarkable highlight colors touch.
+# They are not user-created image highlights and should not become Zotero
+# annotations when they hit no text.
+MIN_IMAGE_HIGHLIGHT_AREA = 25.0
 # Highlights with the same color but a gap of 4+ words should be treated as
 # separate passages. This avoids merging nearby snippets like a sentence and a
 # later quote in the same paragraph.
@@ -357,19 +371,81 @@ def classify_color(color):
     if not color or len(color) < 3:
         return None
     r, g, b = color[:3]
-    for name, ((tr, tg, tb), (dr, dg, db)) in HIGHLIGHT_COLORS.items():
-        if abs(r - tr) < dr and abs(g - tg) < dg and abs(b - tb) < db:
-            return name
     brightness = (r + g + b) / 3
     if brightness < 0.5 or brightness > 0.95:
         return None
-    if g > 0.7 and r < 0.7 and b < 0.7:
+
+    best_name = None
+    best_distance = None
+    for name, targets in RM_HIGHLIGHT_COLOR_PALETTE.items():
+        for tr, tg, tb in targets:
+            distance = ((r - tr) ** 2 + (g - tg) ** 2 + (b - tb) ** 2) ** 0.5
+            if best_distance is None or distance < best_distance:
+                best_name = name
+                best_distance = distance
+    if best_distance is not None and best_distance <= 0.22:
+        return best_name
+
+    # Last-resort hue buckets for future exports with the same broad colors but
+    # slightly different RGB values. These intentionally run after the palette
+    # distance check so yellow does not get misclassified as green.
+    if g > r and g > b and g > 0.65:
         return "green"
+    if r > 0.75 and g > 0.65 and b < 0.65:
+        return "yellow"
+    if r > 0.75 and b > 0.75 and g < 0.75:
+        return "pink"
     if b > 0.7 and r < 0.7 and g < 0.9:
         return "blue"
-    if r > 0.7 and g < 0.5 and b < 0.5:
+    if r > 0.7 and g < 0.55 and b < 0.55:
         return "red"
     return None
+
+
+def _rect_area(rect: fitz.Rect) -> float:
+    return max(rect.x1 - rect.x0, 0.0) * max(rect.y1 - rect.y0, 0.0)
+
+
+def _drawing_highlight_rects(drawing) -> list[fitz.Rect]:
+    """Return actual highlight sub-rectangles from a PyMuPDF drawing.
+
+    reMarkable sometimes stores multiple separated marker bars as one drawing
+    path. PyMuPDF's drawing["rect"] is then only the bounding box of all bars,
+    which would incorrectly include unhighlighted text between them. The path
+    items are emitted as three axis-aligned line segments per filled rectangle.
+    """
+    rects: list[fitz.Rect] = []
+    items = drawing.get("items") or []
+    i = 0
+    while i < len(items):
+        item = items[i]
+        kind = item[0] if item else None
+        if kind == "re" and len(item) >= 2:
+            rect = fitz.Rect(item[1])
+            if not rect.is_empty:
+                rects.append(rect)
+            i += 1
+            continue
+        if i + 2 < len(items) and all((items[i + offset][0] == "l") for offset in range(3)):
+            line_items = items[i:i + 3]
+            points = []
+            for line_item in line_items:
+                points.extend([line_item[1], line_item[2]])
+            xs = [point.x for point in points]
+            ys = [point.y for point in points]
+            rect = fitz.Rect(min(xs), min(ys), max(xs), max(ys))
+            if not rect.is_empty:
+                rects.append(rect)
+                i += 3
+                continue
+        i += 1
+
+    if rects:
+        return rects
+    rect = drawing.get("rect")
+    if not rect or rect.is_empty:
+        return []
+    return [fitz.Rect(rect)]
 
 
 def group_rects_into_passages(rects):
@@ -411,28 +487,68 @@ def _group_color_rects_into_word_passages(words, color_rects):
         hit_indices = _passage_word_hit_indices(words, [rect])
         if hit_indices:
             rect_hits.append((rect, sorted(set(hit_indices))))
-        else:
+        elif _rect_area(rect) >= MIN_IMAGE_HIGHLIGHT_AREA:
             image_rects.append(rect)
 
     passages = []
     current_rects = []
     current_indices = []
     current_max_idx = None
+    current_max_y = None
+    current_last_rect = None
     for rect, hit_indices in rect_hits:
         hit_min = hit_indices[0]
         hit_max = hit_indices[-1]
+        vertical_gap = 0.0 if current_max_y is None else rect.y0 - current_max_y
+        same_visual_line = False
+        horizontal_gap = 0.0
+        if current_last_rect is not None:
+            line_height = max(
+                current_last_rect.y1 - current_last_rect.y0,
+                rect.y1 - rect.y0,
+            )
+            same_visual_line = abs(rect.y0 - current_last_rect.y0) <= line_height * 0.5
+            horizontal_gap = rect.x0 - current_last_rect.x1
+        starts_after_unmarked_line_prefix = False
+        if (
+            current_rects
+            and current_last_rect is not None
+            and current_max_idx is not None
+            and not same_visual_line
+            and vertical_gap < LINE_GAP_TOLERANCE
+        ):
+            for gap_idx in range(current_max_idx + 1, hit_min):
+                gap_word = fitz.Rect(words[gap_idx][:4])
+                if (
+                    abs(gap_word.y0 - rect.y0) <= max(4.0, line_height * 0.75)
+                    and gap_word.x1 <= rect.x0
+                ):
+                    starts_after_unmarked_line_prefix = True
+                    break
         if (
             current_rects
             and current_max_idx is not None
-            and hit_min - current_max_idx > WORD_GROUP_GAP_THRESHOLD
+            and (
+                hit_min - current_max_idx > WORD_GROUP_GAP_THRESHOLD
+                or vertical_gap >= LINE_GAP_TOLERANCE
+                or starts_after_unmarked_line_prefix
+                or (
+                    same_visual_line
+                    and horizontal_gap > max(8.0, line_height * 1.2)
+                )
+            )
         ):
             passages.append((current_rects, sorted(set(current_indices))))
             current_rects = []
             current_indices = []
             current_max_idx = None
+            current_max_y = None
+            current_last_rect = None
         current_rects.append(rect)
         current_indices.extend(hit_indices)
         current_max_idx = hit_max if current_max_idx is None else max(current_max_idx, hit_max)
+        current_max_y = rect.y1 if current_max_y is None else max(current_max_y, rect.y1)
+        current_last_rect = rect
     if current_rects:
         passages.append((current_rects, sorted(set(current_indices))))
 
@@ -474,7 +590,7 @@ def passage_context(page, passage_rects, window=120):
 def _text_from_word_indices(words, hit_indices):
     if not hit_indices:
         return ""
-    return " ".join(words[idx][4] for idx in hit_indices)
+    return _join_pdf_word_text([words[idx] for idx in hit_indices])
 
 
 def _context_from_word_indices(words, hit_indices, window=20):
@@ -544,10 +660,10 @@ def extract_highlights_from_rm(rm_pdf_path, repairer, verbose=True):
             color = classify_color(d.get("fill"))
             if not color:
                 continue
-            r = d.get("rect")
-            if not r or r.is_empty:
-                continue
-            by_color.setdefault(color, []).append(r)
+            for r in _drawing_highlight_rects(d):
+                if not r or r.is_empty:
+                    continue
+                by_color.setdefault(color, []).append(r)
         if not by_color:
             continue
         stats["raw_rects"] += sum(len(rects) for rects in by_color.values())
@@ -645,7 +761,7 @@ def build_flexible_needle_pattern(raw_text: str, substitutions: dict) -> str:
         if c in substitutions:
             # Alle möglichen Ligaturen (plus den bug-char selbst um
             # Identitäts-Match zu erlauben)
-            opts = substitutions[c] + LIGATURE_OPTIONS
+            opts = [c] + substitutions[c] + LIGATURE_OPTIONS
             seen = []
             for o in opts:
                 if o not in seen:
@@ -791,8 +907,15 @@ def _context_ratio(expected: str, actual: str, *, tail: bool) -> float:
     actual_slice_cmp = actual_slice.lower()
     if not actual_slice:
         return 0.0
-    if expected_slice_cmp in actual_slice_cmp or actual_slice_cmp in expected_slice_cmp:
-        return 1.0
+    if expected_slice_cmp in actual_slice_cmp:
+        pos = actual_slice_cmp.find(expected_slice_cmp)
+        distance = (
+            len(actual_slice_cmp) - (pos + len(expected_slice_cmp))
+            if tail else pos
+        )
+        return max(0.5, 1.0 - (distance / max(CONTEXT_WINDOW, 1)))
+    if actual_slice_cmp in expected_slice_cmp:
+        return 0.9
     return _sequence_ratio(expected_slice, actual_slice)
 
 
@@ -885,7 +1008,15 @@ def _score_match_window(container_text: str, start: int, end: int,
     if len(snippet) < min_required:
         return -1.0
 
-    text_score = _sequence_ratio(target_norm, snippet)
+    score_snippet = snippet
+    if method == "line_hyphen":
+        score_snippet = re.sub(
+            r"\b([a-zà-ɏ]{3,})-\s+([a-zà-ɏ]{2,})\b",
+            r"\1\2",
+            score_snippet,
+            flags=re.IGNORECASE,
+        )
+    text_score = _sequence_ratio(target_norm, score_snippet)
     before_score = _context_ratio(
         context_before, container_text[max(0, start - CONTEXT_WINDOW):start], tail=True)
     after_score = _context_ratio(
@@ -907,6 +1038,7 @@ def _score_match_window(container_text: str, start: int, end: int,
 
     method_bonus = {
         "exact": 0.14,
+        "line_hyphen": 0.12,
         "raw_regex": 0.10,
         "repaired_regex": 0.08,
         "anchor": 0.05,
@@ -931,19 +1063,39 @@ def _build_candidate_windows(container_text: str, repaired_text: str,
         return []
 
     candidates = {}
+    max_method_matches = 80 if len(target_norm) < 4 else MAX_MATCHES_PER_METHOD
 
     def remember(start: int, end: int, method: str):
         start = max(0, start)
         end = min(len(container_text), end)
         if end <= start:
             return
+        if len(target_norm) < 4:
+            before = container_text[start - 1] if start > 0 else " "
+            after = container_text[end] if end < len(container_text) else " "
+            if before.isalnum() or after.isalnum():
+                return
         key = (start, end)
         existing = candidates.get(key)
         if existing is None or method == "exact":
             candidates[key] = method
 
-    for start, end in _iter_literal_spans(container_text, target_norm):
+    for start, end in _iter_literal_spans(container_text, target_norm, max_method_matches):
         remember(start, end, "exact")
+
+    if re.fullmatch(r"[a-z]{6,}", target_norm):
+        hyphen_parts = []
+        for split_at in range(3, len(target_norm) - 2):
+            hyphen_parts.append(
+                re.escape(target_norm[:split_at]) + r"\s*-\s+" + re.escape(target_norm[split_at:])
+            )
+        if hyphen_parts:
+            try:
+                hyphen_regex = re.compile("(?:" + "|".join(hyphen_parts) + ")", re.IGNORECASE)
+                for start, end in _iter_regex_spans(container_text, hyphen_regex, max_method_matches):
+                    remember(start, end, "line_hyphen")
+            except re.error:
+                pass
 
     pattern_sources = [
         (raw_text, "raw_regex"),
@@ -959,11 +1111,11 @@ def _build_candidate_windows(container_text: str, repaired_text: str,
             )
         except re.error:
             continue
-        for start, end in _iter_regex_spans(container_text, regex):
+        for start, end in _iter_regex_spans(container_text, regex, max_method_matches):
             remember(start, end, method)
 
     for anchor_text, anchor_offset in _extract_anchor_segments(repaired_text or raw_text):
-        for anchor_start, _anchor_end in _iter_literal_spans(container_text, anchor_text):
+        for anchor_start, _anchor_end in _iter_literal_spans(container_text, anchor_text, max_method_matches):
             start = max(0, anchor_start - anchor_offset)
             remember(start, start + len(target_norm), "anchor")
 
@@ -1073,6 +1225,12 @@ def _preferred_output_text(preferred_text: str, matched_text: str) -> str:
     similarity = _sequence_ratio(preferred_norm, matched_norm)
     if similarity >= 0.72 and _broken_output_score(preferred) < _broken_output_score(matched):
         return preferred
+    # AI-reviewed extracts may correct real-word OCR/TextLayer mistakes
+    # ("sock" -> "stock"). If the texts are otherwise effectively identical,
+    # prefer the reviewed text for Zotero note quality while keeping the
+    # matched geometry from the PDF.
+    if similarity >= 0.96 and preferred != matched:
+        return preferred
     return matched
 
 
@@ -1110,7 +1268,7 @@ def _should_merge_pdf_line_hyphen(previous_text: str, current_text: str,
     # These are visible compounds/prefix constructions, not broken words.
     if prefix in {"in", "out", "buy", "sell", "call", "put", "long", "short"}:
         return False
-    return len(prefix) >= 4 or prefix in {"vol"}
+    return len(prefix) >= 4 or prefix in {"vol"} or (len(prefix) >= 3 and previous_text[:1].isupper())
 
 
 def _join_pdf_word_text(hit_words) -> str:
@@ -1705,11 +1863,17 @@ def _search_text_in_pdf(doc, repaired_text: str, raw_text: str,
                         last_location: Optional[tuple[int, int]] = None,
                         page_cache: Optional[dict] = None):
     target_norm = normalize_for_match(repaired_text or raw_text)
-    if len(target_norm) < 4:
+    if len(target_norm) < 2:
+        return None, MatchFailure(reason="context_too_short")
+    if len(target_norm) < 4 and not (context_before or context_after):
         return None, MatchFailure(reason="context_too_short")
 
-    page_order = list(range(max(0, hint_page - 3), min(doc.page_count, hint_page + 4)))
-    page_order += [i for i in range(doc.page_count) if i not in page_order]
+    nearby_pages = []
+    for distance in range(0, 4):
+        for pi in (hint_page - distance, hint_page + distance):
+            if 0 <= pi < doc.page_count and pi not in nearby_pages:
+                nearby_pages.append(pi)
+    page_order = nearby_pages + [i for i in range(doc.page_count) if i not in nearby_pages]
 
     best_match = None
     best_page = None

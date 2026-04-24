@@ -75,6 +75,87 @@ class ReviewFixTests(unittest.TestCase):
         self.assertIsNotNone(failure)
         self.assertEqual(failure.reason, "context_too_short")
 
+    def test_flexible_regex_keeps_identity_for_ascii_bug_candidates(self):
+        text = "this is referred to as the mean-or average- volatility level."
+        target = "This is referred to as the mean—or average— volatility level."
+
+        candidates = rmha._build_candidate_windows(
+            text,
+            target,
+            target,
+            rmha.MATCH_SUBSTITUTIONS,
+        )
+
+        self.assertTrue(candidates)
+
+    def test_short_pdf_candidates_do_not_match_inside_words(self):
+        candidates = rmha._build_candidate_windows(
+            "otherwise, the covered call strategy",
+            "The",
+            "The",
+            rmha.MATCH_SUBSTITUTIONS,
+        )
+
+        matched = ["otherwise, the covered call strategy"[start:end] for start, end, _ in candidates]
+        self.assertIn("the", matched)
+        self.assertNotIn("the", ["otherwise"[start:end] for start, end, _ in candidates if end <= len("otherwise")])
+
+    def test_short_pdf_candidates_scan_beyond_first_eight_hits(self):
+        text = " ".join(["the"] * 12)
+
+        candidates = rmha._build_candidate_windows(
+            text,
+            "The",
+            "The",
+            rmha.MATCH_SUBSTITUTIONS,
+        )
+
+        self.assertGreater(len(candidates), 8)
+
+    def test_single_word_candidates_match_pdf_line_hyphenation(self):
+        candidates = rmha._build_candidate_windows(
+            "the option's delta. mon- eyness describes the degree",
+            "Moneyness",
+            "Moneyness",
+            rmha.MATCH_SUBSTITUTIONS,
+        )
+
+        matched = [
+            "the option's delta. mon- eyness describes the degree"[start:end]
+            for start, end, _ in candidates
+        ]
+        self.assertIn("mon- eyness", matched)
+
+    def test_context_ratio_penalizes_delayed_after_context(self):
+        expected = "describes the degree to which the option is in- or out-of-the-money."
+        immediate = "describes the degree to which the option is in- or out-of-the-money."
+        delayed = "on the option's delta. mon- eyness describes the degree to which the option is in- or out-of-the-money."
+
+        self.assertGreater(
+            rmha._context_ratio(expected, immediate, tail=False),
+            rmha._context_ratio(expected, delayed, tail=False),
+        )
+
+    def test_line_hyphen_score_can_beat_earlier_exact_word_with_better_context(self):
+        target = "moneyness"
+        context_before = "the next observation is the effect of moneyness on the option's delta."
+        context_after = "describes the degree to which the option is in- or out-of-the-money."
+        earlier = "the next observation is the effect of moneyness on the option's delta. mon- eyness describes"
+        line_hyphen = "the next observation is the effect of moneyness on the option's delta. mon- eyness describes"
+        earlier_start = earlier.index("moneyness")
+        earlier_end = earlier_start + len("moneyness")
+        hyphen_start = line_hyphen.index("mon- eyness")
+        hyphen_end = hyphen_start + len("mon- eyness")
+
+        exact_score = rmha._score_match_window(
+            earlier, earlier_start, earlier_end, target,
+            context_before, context_after, 0, 0, None, "exact")
+        hyphen_score = rmha._score_match_window(
+            line_hyphen, hyphen_start, hyphen_end, target,
+            context_before, context_after, 0, 0, None, "line_hyphen")
+
+        self.assertGreater(hyphen_score, exact_score)
+
     def test_stable_annotation_key_is_deterministic(self):
         source = {
             "kind": "text",
@@ -90,6 +171,90 @@ class ReviewFixTests(unittest.TestCase):
         key3 = rmha._stable_annotation_key(changed)
         self.assertEqual(key1, key2)
         self.assertNotEqual(key1, key3)
+
+    def test_classify_color_recognizes_remarkable_export_colors(self):
+        self.assertEqual(rmha.classify_color((1.0, 0.929, 0.459)), "yellow")
+        self.assertEqual(rmha.classify_color((0.675, 1.0, 0.522)), "green")
+        self.assertEqual(rmha.classify_color((0.949, 0.62, 1.0)), "pink")
+        self.assertEqual(rmha.classify_color((1.0, 0.765, 0.549)), "orange")
+        self.assertIsNone(rmha.classify_color((1.0, 1.0, 1.0)))
+        self.assertIsNone(rmha.classify_color((0.137, 0.122, 0.125)))
+
+    def test_drawing_highlight_rects_splits_combined_remarkable_paths(self):
+        drawing = {
+            "items": [
+                ("l", rmha.fitz.Point(10, 20), rmha.fitz.Point(30, 20)),
+                ("l", rmha.fitz.Point(30, 20), rmha.fitz.Point(30, 32)),
+                ("l", rmha.fitz.Point(30, 32), rmha.fitz.Point(10, 32)),
+                ("l", rmha.fitz.Point(50, 80), rmha.fitz.Point(90, 80)),
+                ("l", rmha.fitz.Point(90, 80), rmha.fitz.Point(90, 92)),
+                ("l", rmha.fitz.Point(90, 92), rmha.fitz.Point(50, 92)),
+            ],
+            "rect": rmha.fitz.Rect(10, 20, 90, 92),
+        }
+
+        rects = rmha._drawing_highlight_rects(drawing)
+
+        self.assertEqual(len(rects), 2)
+        self.assertEqual(tuple(rects[0]), (10.0, 20.0, 30.0, 32.0))
+        self.assertEqual(tuple(rects[1]), (50.0, 80.0, 90.0, 92.0))
+
+    def test_word_passages_split_geometrically_separate_terms(self):
+        words = [
+            (10.0, 10.0, 40.0, 20.0, "naked", 0, 0, 0),
+            (10.0, 100.0, 50.0, 110.0, "covered", 1, 0, 0),
+        ]
+        rects = [
+            rmha.fitz.Rect(10.0, 10.0, 40.0, 20.0),
+            rmha.fitz.Rect(10.0, 100.0, 50.0, 110.0),
+        ]
+
+        passages, image_passages = rmha._group_color_rects_into_word_passages(words, rects)
+
+        self.assertEqual(len(passages), 2)
+        self.assertEqual(image_passages, [])
+        self.assertEqual(passages[0][1], [0])
+        self.assertEqual(passages[1][1], [1])
+
+    def test_word_passages_split_same_line_terms_with_large_gap(self):
+        words = [
+            (10.0, 10.0, 40.0, 20.0, "long", 0, 0, 0),
+            (44.0, 10.0, 62.0, 20.0, "put", 0, 0, 1),
+            (100.0, 10.0, 150.0, 20.0, "protective", 0, 0, 2),
+            (154.0, 10.0, 172.0, 20.0, "put", 0, 0, 3),
+        ]
+        rects = [
+            rmha.fitz.Rect(10.0, 10.0, 62.0, 20.0),
+            rmha.fitz.Rect(100.0, 10.0, 172.0, 20.0),
+        ]
+
+        passages, image_passages = rmha._group_color_rects_into_word_passages(words, rects)
+
+        self.assertEqual(len(passages), 2)
+        self.assertEqual(image_passages, [])
+        self.assertEqual(passages[0][1], [0, 1])
+        self.assertEqual(passages[1][1], [2, 3])
+
+    def test_word_passages_split_wrapped_terms_with_unmarked_line_prefix(self):
+        words = [
+            (320.0, 10.0, 370.0, 20.0, "long", 0, 0, 0),
+            (374.0, 10.0, 392.0, 20.0, "put", 0, 0, 1),
+            (10.0, 23.0, 34.0, 33.0, "and", 1, 0, 0),
+            (38.0, 23.0, 58.0, 33.0, "the", 1, 0, 1),
+            (90.0, 23.0, 140.0, 33.0, "protective", 1, 0, 2),
+            (144.0, 23.0, 162.0, 33.0, "put", 1, 0, 3),
+        ]
+        rects = [
+            rmha.fitz.Rect(320.0, 10.0, 392.0, 20.0),
+            rmha.fitz.Rect(90.0, 23.0, 162.0, 33.0),
+        ]
+
+        passages, image_passages = rmha._group_color_rects_into_word_passages(words, rects)
+
+        self.assertEqual(len(passages), 2)
+        self.assertEqual(image_passages, [])
+        self.assertEqual(passages[0][1], [0, 1])
+        self.assertEqual(passages[1][1], [4, 5])
 
     def test_build_unmatched_entry_includes_reason_metadata(self):
         highlight = rmha.Highlight(
@@ -126,6 +291,14 @@ class ReviewFixTests(unittest.TestCase):
         text = rmha._join_pdf_word_text(words)
         self.assertEqual(text, "Theoretical value—what a concept! Specifically,")
 
+    def test_preferred_output_text_keeps_ai_reviewed_real_word_fix(self):
+        preferred = "sell the stock at the strike price"
+        matched = "sell the sock at the strike price"
+
+        text = rmha._preferred_output_text(preferred, matched)
+
+        self.assertEqual(text, preferred)
+
     def test_join_pdf_word_text_keeps_visible_compound_hyphens(self):
         words = [
             (300, 10, 330, 20, "and—"),
@@ -145,6 +318,14 @@ class ReviewFixTests(unittest.TestCase):
         ]
         text = rmha._join_pdf_word_text(words)
         self.assertEqual(text, "volatility")
+
+    def test_join_pdf_word_text_merges_capitalized_short_line_hyphenation(self):
+        words = [
+            (350, 10, 380, 20, "Mon-"),
+            (10, 24, 50, 34, "eyness"),
+        ]
+        text = rmha._join_pdf_word_text(words)
+        self.assertEqual(text, "Moneyness")
 
     def test_search_text_in_pdf_returns_original_word_text(self):
         doc = rmha.fitz.open()

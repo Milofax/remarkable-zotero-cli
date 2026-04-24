@@ -713,6 +713,14 @@ class MatchFailure:
     best_method: Optional[str] = None
 
 
+@dataclass
+class PdfMatchResult:
+    quads: list
+    page: object
+    matched_text: str
+    last_location: tuple[int, int]
+
+
 def _build_unmatched_entry(highlight: Highlight,
                            failure: Optional[MatchFailure] = None) -> dict:
     entry = {
@@ -1068,6 +1076,62 @@ def _preferred_output_text(preferred_text: str, matched_text: str) -> str:
     return matched
 
 
+_DISPLAY_TEXT_TRANS = str.maketrans({
+    " ": " ", " ": " ", " ": " ", "​": "",
+    "­": "",  # soft hyphen
+})
+
+
+def _clean_pdf_word_text(text: str) -> str:
+    if not text:
+        return ""
+    text = unicodedata.normalize("NFKC", text).translate(_DISPLAY_TEXT_TRANS)
+    text = "".join(ch for ch in text if ch >= " " or ch in "\t\n\r")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _is_pdf_line_break(previous_word, current_word) -> bool:
+    return (
+        current_word[0] < previous_word[0]
+        or current_word[1] - previous_word[1] > 2.0
+    )
+
+
+def _should_merge_pdf_line_hyphen(previous_text: str, current_text: str,
+                                  previous_word, current_word) -> bool:
+    if not previous_text.endswith("-") or previous_text.endswith(("–", "—", "−")):
+        return False
+    if not current_text[:1].islower():
+        return False
+    if not _is_pdf_line_break(previous_word, current_word):
+        return False
+    prefix = previous_text[:-1].lower()
+    # These are visible compounds/prefix constructions, not broken words.
+    if prefix in {"in", "out", "buy", "sell", "call", "put", "long", "short"}:
+        return False
+    return len(prefix) >= 4 or prefix in {"vol"}
+
+
+def _join_pdf_word_text(hit_words) -> str:
+    pieces = []
+    previous_word = None
+    for word_info in hit_words:
+        word = _clean_pdf_word_text(word_info[4])
+        if not word:
+            continue
+        if (
+            pieces
+            and previous_word is not None
+            and _should_merge_pdf_line_hyphen(pieces[-1], word, previous_word, word_info)
+        ):
+            pieces[-1] = pieces[-1][:-1] + word
+        else:
+            pieces.append(word)
+        previous_word = word_info
+    return " ".join(pieces)
+
+
 def _match_boundary_score(text: str) -> float:
     if not text:
         return 0.0
@@ -1140,6 +1204,26 @@ def _context_anchor_variants(text: str, tail: bool) -> list[str]:
         part = tokens[-size:] if tail else tokens[:size]
         anchor = " ".join(part).strip()
         if len(anchor) < 12 or anchor in seen:
+            continue
+        seen.add(anchor)
+        variants.append(anchor)
+    return variants
+
+
+def _pdf_context_anchor_variants(text: str, tail: bool) -> list[str]:
+    norm = normalize_for_match(text)
+    tokens = [
+        match.group(0)
+        for match in re.finditer(r"\S+", norm)
+    ]
+    variants = []
+    seen = set()
+    for size in (8, 6, 5, 4, 3, 2):
+        if len(tokens) < size:
+            continue
+        part = tokens[-size:] if tail else tokens[:size]
+        anchor = " ".join(part).strip()
+        if len(anchor) < 6 or anchor in seen:
             continue
         seen.add(anchor)
         variants.append(anchor)
@@ -1399,13 +1483,17 @@ def annotate_pdf(original_pdf: str, highlights: list[Highlight],
             continue
 
         # Text-Highlight: suche im Original-PDF
-        quads, page, matched_text, last_match_location, match_failure = _search_text_in_pdf(
+        pdf_match, match_failure = _search_text_in_pdf(
             doc, hl.text, hl.raw_text, hl.context_before, hl.context_after,
             substitutions, hint_page=hl.rm_page,
             last_location=last_match_location, page_cache=page_cache)
-        if quads and page is not None:
-            output_text = _preferred_output_text(hl.text or hl.raw_text, matched_text or hl.text)
-            annot = page.add_highlight_annot(quads=quads)
+        if pdf_match:
+            last_match_location = pdf_match.last_location
+            output_text = _preferred_output_text(
+                hl.text or hl.raw_text,
+                pdf_match.matched_text,
+            )
+            annot = pdf_match.page.add_highlight_annot(quads=pdf_match.quads)
             annot.set_colors(stroke=ANNOT_COLOR_MAP.get(hl.color, (1, 1, 0)))
             annot.set_info(title="Remarkable Import",
                            content=output_text)
@@ -1415,10 +1503,10 @@ def annotate_pdf(original_pdf: str, highlights: list[Highlight],
                 annot,
                 key_source={
                     "kind": "text",
-                    "page_index": page.number,
+                    "page_index": pdf_match.page.number,
                     "color": hl.color,
                     "text": output_text,
-                    "geometry": _quad_geometry_key(quads),
+                    "geometry": _quad_geometry_key(pdf_match.quads),
                 },
             )
             stats["text_matched"] += 1
@@ -1515,6 +1603,75 @@ def _quads_from_word_hits(hit_words):
     ]
 
 
+def _refine_pdf_match_range(page_text: str, match: TextMatch,
+                            repaired_text: str, raw_text: str,
+                            context_before: str, context_after: str,
+                            window: int = 900) -> TextMatch:
+    target_norm = normalize_for_match(repaired_text or raw_text)
+    if not target_norm:
+        return match
+
+    start_candidates = []
+    end_candidates = []
+    search_start = max(0, match.start - window)
+    search_end = min(len(page_text), match.end + window)
+    snippet = page_text[search_start:search_end]
+
+    for anchor in _pdf_context_anchor_variants(context_before, tail=True):
+        anchor_end = max(0, match.start - search_start + 160)
+        pos = snippet.rfind(anchor, 0, anchor_end)
+        if pos < 0:
+            continue
+        start = search_start + pos + len(anchor)
+        while start < len(page_text) and page_text[start] == " ":
+            start += 1
+        start_candidates.append(start)
+
+    for anchor in _pdf_context_anchor_variants(context_after, tail=False):
+        anchor_start = max(0, match.end - search_start - 160)
+        pos = snippet.find(anchor, anchor_start)
+        if pos < 0:
+            continue
+        end = search_start + pos
+        while end > 0 and page_text[end - 1] == " ":
+            end -= 1
+        end_candidates.append(end)
+
+    pairs = [(match.start, match.end)]
+    pairs.extend((start, match.end) for start in start_candidates)
+    pairs.extend((match.start, end) for end in end_candidates)
+    pairs.extend(
+        (start, end)
+        for start in start_candidates
+        for end in end_candidates
+    )
+
+    best = match
+    for start, end in pairs:
+        if start < 0 or end <= start or end > len(page_text):
+            continue
+        candidate_text = page_text[start:end].strip()
+        candidate_norm = normalize_for_match(candidate_text)
+        if len(candidate_norm) < 2:
+            continue
+        if len(candidate_norm) > max(len(target_norm) * 2.5, len(target_norm) + 180):
+            continue
+        score = _match_candidate_score(target_norm, candidate_text)
+        if start != match.start or end != match.end:
+            score += 0.08
+        context_adjusted = start != match.start or end != match.end
+        if score > best.score + 0.01 or (context_adjusted and score >= best.score - 0.02):
+            best = TextMatch(
+                container_index=match.container_index,
+                start=start,
+                end=end,
+                score=score,
+                matched_text=candidate_text,
+                method=f"{match.method}+context",
+            )
+    return best
+
+
 def _search_text_in_pdf(doc, repaired_text: str, raw_text: str,
                         context_before: str, context_after: str,
                         substitutions: dict, hint_page: int = 0,
@@ -1522,7 +1679,7 @@ def _search_text_in_pdf(doc, repaired_text: str, raw_text: str,
                         page_cache: Optional[dict] = None):
     target_norm = normalize_for_match(repaired_text or raw_text)
     if len(target_norm) < 4:
-        return None, None, "", last_location, MatchFailure(reason="context_too_short")
+        return None, MatchFailure(reason="context_too_short")
 
     page_order = list(range(max(0, hint_page - 3), min(doc.page_count, hint_page + 4)))
     page_order += [i for i in range(doc.page_count) if i not in page_order]
@@ -1530,6 +1687,7 @@ def _search_text_in_pdf(doc, repaired_text: str, raw_text: str,
     best_match = None
     best_page = None
     best_quads = None
+    best_text = ""
     best_failure = None
 
     for pi in page_order:
@@ -1565,6 +1723,9 @@ def _search_text_in_pdf(doc, repaired_text: str, raw_text: str,
                 best_failure = failure
             continue
 
+        match = _refine_pdf_match_range(
+            page_text, match, repaired_text, raw_text,
+            context_before, context_after)
         hit_words = [
             word_info for start, end, word_info in word_spans
             if start < match.end and end > match.start
@@ -1572,22 +1733,26 @@ def _search_text_in_pdf(doc, repaired_text: str, raw_text: str,
         if not hit_words:
             continue
         quads = _quads_from_word_hits(hit_words)
+        matched_word_text = _join_pdf_word_text(hit_words)
 
         if best_match is None or match.score > best_match.score:
             best_match = match
             best_page = page
             best_quads = quads
+            best_text = matched_word_text
             if match.score >= CONFIDENT_MATCH_SCORE:
                 break
 
     if best_match is None or best_page is None or best_quads is None:
-        return None, None, "", last_location, best_failure
+        return None, best_failure
 
     return (
-        best_quads,
-        best_page,
-        best_match.matched_text,
-        (best_match.container_index, best_match.start),
+        PdfMatchResult(
+            quads=best_quads,
+            page=best_page,
+            matched_text=best_text or best_match.matched_text,
+            last_location=(best_match.container_index, best_match.start),
+        ),
         None,
     )
 

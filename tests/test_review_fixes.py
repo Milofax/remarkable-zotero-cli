@@ -115,6 +115,110 @@ class ReviewFixTests(unittest.TestCase):
         self.assertEqual(entry["best_method"], "anchor")
         self.assertEqual(entry["best_score"], 0.41)
 
+    def test_join_pdf_word_text_preserves_human_text(self):
+        words = [
+            (0, 0, 10, 10, "Theoretical"),
+            (12, 0, 20, 10, "value—what"),
+            (22, 0, 30, 10, "a"),
+            (32, 0, 40, 10, "concept!"),
+            (42, 0, 50, 10, "Speciﬁcally,"),
+        ]
+        text = rmha._join_pdf_word_text(words)
+        self.assertEqual(text, "Theoretical value—what a concept! Specifically,")
+
+    def test_join_pdf_word_text_keeps_visible_compound_hyphens(self):
+        words = [
+            (300, 10, 330, 20, "and—"),
+            (10, 24, 40, 34, "since"),
+            (300, 40, 330, 50, "buy-"),
+            (10, 54, 40, 64, "write"),
+            (300, 70, 330, 80, "in-"),
+            (10, 84, 40, 94, "or"),
+        ]
+        text = rmha._join_pdf_word_text(words)
+        self.assertEqual(text, "and— since buy- write in- or")
+
+    def test_join_pdf_word_text_merges_true_line_hyphenation(self):
+        words = [
+            (300, 10, 330, 20, "vol-"),
+            (10, 24, 40, 34, "atility"),
+        ]
+        text = rmha._join_pdf_word_text(words)
+        self.assertEqual(text, "volatility")
+
+    def test_search_text_in_pdf_returns_original_word_text(self):
+        doc = rmha.fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), "Option Type There are two types of options: Calls")
+        highlight_text = "option type there are two types of options: c"
+        result, failure = rmha._search_text_in_pdf(
+            doc,
+            highlight_text,
+            highlight_text,
+            "",
+            "",
+            rmha.MATCH_SUBSTITUTIONS,
+            hint_page=0,
+        )
+        try:
+            self.assertIsNone(failure)
+            self.assertIsNotNone(result)
+            self.assertEqual(
+                result.matched_text,
+                "Option Type There are two types of options: Calls",
+            )
+        finally:
+            doc.close()
+
+    def test_pdf_context_refine_drops_leading_context_words(self):
+        page_text = rmha.normalize_for_match(
+            "All models achieve the same end: the option's theoretical value. "
+            "For American-exercise equity options, six inputs are entered."
+        )
+        match = rmha.TextMatch(
+            container_index=0,
+            start=page_text.index("end: the option"),
+            end=len(page_text),
+            score=0.7,
+            matched_text=page_text[page_text.index("end: the option"):],
+            method="anchor",
+        )
+        refined = rmha._refine_pdf_match_range(
+            page_text,
+            match,
+            "y g y option's theoretical value. For American-exercise equity options, six inputs are entered.",
+            "y g y option's theoretical value. For American-exercise equity options, six inputs are entered.",
+            "All models achieve the same end: the",
+            "",
+        )
+        self.assertEqual(
+            refined.matched_text,
+            "option's theoretical value. for american-exercise equity options, six inputs are entered.",
+        )
+
+    def test_pdf_context_refine_keeps_short_context_tokens(self):
+        page_text = rmha.normalize_for_match(
+            "Stock A has a higher historical volatility than Stock B. "
+            "Historical volatility (HV) is the annualized standard deviation."
+        )
+        match = rmha.TextMatch(
+            container_index=0,
+            start=page_text.index("b. historical"),
+            end=page_text.index(" is the annualized"),
+            score=0.8,
+            matched_text="b. historical volatility (hv)",
+            method="anchor",
+        )
+        refined = rmha._refine_pdf_match_range(
+            page_text,
+            match,
+            "p Historical volatility (HV)",
+            "p Historical volatility (HV)",
+            "Stock A has a higher historical volatility than Stock B.",
+            "is the annualized standard deviation.",
+        )
+        self.assertEqual(refined.matched_text, "historical volatility (hv)")
+
     def test_remove_empty_highlight_spans_preserves_text(self):
         tree = rmha.etree.fromstring(
             b'<html xmlns="http://www.w3.org/1999/xhtml"><body><p>'

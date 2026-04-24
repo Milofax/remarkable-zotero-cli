@@ -24,6 +24,10 @@ Genau dafuer ist das Skript da.
 
 - Ausgabe: `*.annotated.pdf`
 - Textmarkierungen werden als echte PDF-Highlights geschrieben
+- Annotationstexte werden aus den sichtbaren Worttreffern im Original-PDF
+  rekonstruiert, nicht aus dem normalisierten Suchstring
+- Kontext vor/nach dem reMarkable-Highlight wird genutzt, um angeschnittene
+  Anfangs- oder Endwoerter zu korrigieren
 - Bild-/Flaechenmarkierungen werden als PDF-Rechtecke geschrieben
 - wo Zotero es fuer den Import braucht, setzt das Skript kompatible
   Annotation-Keys auf die einzelnen PDF-Annotationsobjekte

@@ -1,0 +1,39 @@
+name: Bug report
+description: Report an incorrect annotation, import problem, or crash.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please do not attach copyrighted source PDFs, EPUBs, or private notes.
+        Synthetic reproductions are ideal.
+  - type: dropdown
+    id: source_type
+    attributes:
+      label: Source format
+      options:
+        - PDF
+        - EPUB
+        - Both
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe the expected and actual annotation behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: review
+    attributes:
+      label: Review output
+      description: Paste the relevant non-private parts of `*.annotated.review.json`.
+      render: json
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Minimal commands or synthetic files that reproduce the issue.
+      render: bash

@@ -1,10 +1,12 @@
 import importlib.util
 import sys
+import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 
-REPO_ROOT = Path("/Volumes/DATEN/Coding/remarkable-zotero-cli")
+REPO_ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = REPO_ROOT / "rm-highlights-to-annotations.py"
 
 
@@ -506,6 +508,21 @@ class ReviewFixTests(unittest.TestCase):
         self.assertFalse(green_span.xpath(
             './/*[contains(concat(" ", normalize-space(@class), " "), " rm-highlight-yellow ")]'
         ))
+
+    def test_epub_member_validation_rejects_path_traversal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bad.epub"
+            with zipfile.ZipFile(path, "w") as zout:
+                zout.writestr("mimetype", "application/epub+zip")
+                zout.writestr("../evil.txt", "nope")
+
+            with self.assertRaises(ValueError):
+                rmha._read_epub_entries(str(path))
+
+    def test_epub_href_resolution_allows_safe_parent_reference(self):
+        resolved = rmha._epub_join_path("OPS/Text", "../Images/cover.xhtml")
+
+        self.assertEqual(resolved, "OPS/Images/cover.xhtml")
 
 
 if __name__ == "__main__":

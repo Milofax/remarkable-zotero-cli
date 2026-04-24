@@ -42,6 +42,7 @@ import hashlib
 import io
 import json
 import os
+import posixpath
 import re
 import shutil
 import sys
@@ -52,6 +53,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
+from urllib.parse import unquote
 from typing import Iterator, Optional
 
 try:
@@ -137,6 +139,8 @@ MAX_MATCHES_PER_METHOD = 8
 BACKTRACK_CONTAINER_PENALTY = 0.06
 BACKTRACK_OFFSET_PENALTY = 0.03
 FORWARD_ORDER_BONUS = 0.02
+MAX_EPUB_MEMBER_BYTES = 100 * 1024 * 1024
+MAX_EPUB_TOTAL_BYTES = 500 * 1024 * 1024
 
 
 # ============================================================
@@ -2248,6 +2252,58 @@ NSMAP = {
 }
 
 
+def _validate_epub_member_name(name: str) -> str:
+    """Reject ZIP member names that could become unsafe when extracted later."""
+    if not name:
+        raise ValueError("EPUB contains an empty ZIP member name")
+    if "\x00" in name or "\\" in name:
+        raise ValueError(f"Unsafe EPUB ZIP member name: {name!r}")
+    if name.startswith("/") or re.match(r"^[A-Za-z]:", name):
+        raise ValueError(f"Unsafe EPUB ZIP member name: {name!r}")
+    parts = name.split("/")
+    if any(part in ("", ".", "..") for part in parts):
+        raise ValueError(f"Unsafe EPUB ZIP member name: {name!r}")
+    if posixpath.normpath(name) != name:
+        raise ValueError(f"Non-normalized EPUB ZIP member name: {name!r}")
+    return name
+
+
+def _epub_join_path(base_dir: str, href: str) -> str:
+    href_path = unquote((href or "").split("#", 1)[0])
+    if not href_path:
+        raise ValueError("EPUB manifest contains an empty href")
+    if href_path.startswith("/") or "\\" in href_path:
+        raise ValueError(f"Unsafe EPUB href: {href!r}")
+    full = posixpath.normpath(posixpath.join(base_dir, href_path))
+    return _validate_epub_member_name(full)
+
+
+def _read_epub_entries(path: str) -> dict[str, bytes]:
+    entries: dict[str, bytes] = {}
+    total_size = 0
+    with zipfile.ZipFile(path, "r") as zin:
+        for info in zin.infolist():
+            if info.is_dir():
+                continue
+            name = _validate_epub_member_name(info.filename)
+            if name in entries:
+                raise ValueError(f"Duplicate EPUB ZIP member: {name!r}")
+            if info.file_size > MAX_EPUB_MEMBER_BYTES:
+                raise ValueError(f"EPUB member too large: {name!r}")
+            total_size += info.file_size
+            if total_size > MAX_EPUB_TOTAL_BYTES:
+                raise ValueError("EPUB uncompressed size is too large")
+            entries[name] = zin.read(info)
+    return entries
+
+
+def _write_epub_member(zout: zipfile.ZipFile, name: str, data: bytes, compress_type: int):
+    safe_name = _validate_epub_member_name(name)
+    info = zipfile.ZipInfo(safe_name)
+    info.compress_type = compress_type
+    zout.writestr(info, data)
+
+
 def _parse_opf(epub: zipfile.ZipFile):
     """Return (opf_path, opf_tree, spine_hrefs) — hrefs are absolute inside zip."""
     container = epub.read("META-INF/container.xml")
@@ -2265,9 +2321,7 @@ def _parse_opf(epub: zipfile.ZipFile):
         idref = itemref.get("idref")
         href = manifest.get(idref)
         if href:
-            full = os.path.normpath(os.path.join(opf_dir, href)) if opf_dir else href
-            full = full.replace(os.sep, "/")
-            spine_hrefs.append(full)
+            spine_hrefs.append(_epub_join_path(opf_dir, href))
     return opf_path, opf_tree, spine_hrefs
 
 
@@ -2492,9 +2546,10 @@ def annotate_epub(original_epub: str, highlights: list[Highlight],
     unmatched_entries = []
     notes_entries = []
 
-    # Read EPUB into memory
-    with zipfile.ZipFile(original_epub, "r") as zin:
-        entries = {n: zin.read(n) for n in zin.namelist()}
+    # Read EPUB into memory after validating member names. Even though this
+    # script does not extract ZIP files to disk, unsafe names should not be
+    # copied into an output EPUB that a later tool might extract.
+    entries = _read_epub_entries(original_epub)
     opf_path = None
     opf_dir = ""
     # parse spine
@@ -2512,9 +2567,7 @@ def annotate_epub(original_epub: str, highlights: list[Highlight],
         idref = itemref.get("idref")
         href = manifest_id_to_href.get(idref)
         if href:
-            full = os.path.normpath(os.path.join(opf_dir, href)) if opf_dir else href
-            full = full.replace(os.sep, "/")
-            spine_hrefs.append(full)
+            spine_hrefs.append(_epub_join_path(opf_dir, href))
 
     bookmarks: list[dict] = []
     pending_matches: list[EpubMatch] = []
@@ -2766,9 +2819,8 @@ def annotate_epub(original_epub: str, highlights: list[Highlight],
             tree, xml_declaration=True, encoding="utf-8", pretty_print=False)
 
     # Add stylesheet CSS file
-    css_path = os.path.normpath(os.path.join(opf_dir, "Styles", "rm-highlights.css")) \
-        if opf_dir else "Styles/rm-highlights.css"
-    css_path = css_path.replace(os.sep, "/")
+    css_path = _epub_join_path(opf_dir, "Styles/rm-highlights.css") if opf_dir \
+        else "Styles/rm-highlights.css"
     entries[css_path] = EPUB_HIGHLIGHT_CSS.encode("utf-8")
 
     # Register CSS in manifest
@@ -2789,15 +2841,11 @@ def annotate_epub(original_epub: str, highlights: list[Highlight],
     with zipfile.ZipFile(output_path, "w") as zout:
         # mimetype MUST be first and uncompressed
         if "mimetype" in entries:
-            info = zipfile.ZipInfo("mimetype")
-            info.compress_type = zipfile.ZIP_STORED
-            zout.writestr(info, entries["mimetype"])
+            _write_epub_member(zout, "mimetype", entries["mimetype"], zipfile.ZIP_STORED)
         for name, data in entries.items():
             if name == "mimetype":
                 continue
-            info = zipfile.ZipInfo(name)
-            info.compress_type = zipfile.ZIP_DEFLATED
-            zout.writestr(info, data)
+            _write_epub_member(zout, name, data, zipfile.ZIP_DEFLATED)
 
     # Optional: schreibe unmatched als JSON (für AI/manuelles Review)
     if unmatched_out and unmatched_entries:
@@ -2846,9 +2894,8 @@ def _ensure_css_link(tree, opf_dir: str, xhtml_path: str):
     if head is None:
         return
     # Relative path from xhtml_path to Styles/rm-highlights.css (in opf_dir)
-    css_abs = os.path.normpath(os.path.join(opf_dir, "Styles", "rm-highlights.css")) \
-        if opf_dir else "Styles/rm-highlights.css"
-    css_abs = css_abs.replace(os.sep, "/")
+    css_abs = _epub_join_path(opf_dir, "Styles/rm-highlights.css") if opf_dir \
+        else "Styles/rm-highlights.css"
     xhtml_dir = os.path.dirname(xhtml_path).replace(os.sep, "/")
     rel = os.path.relpath(css_abs, xhtml_dir).replace(os.sep, "/")
     # check existing

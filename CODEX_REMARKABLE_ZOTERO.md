@@ -33,6 +33,20 @@ Das Output soll also weiterhin ein normales `PDF` oder `EPUB` sein, darf aber
 die minimal noetigen Kompatibilitaetsmetadaten enthalten, die fuer den
 fehlerfreien Import in Zotero aktuell noetig sind.
 
+## Repo- und Sicherheitsregeln
+
+Dieses Repo ist fuer oeffentliche Nutzung vorbereitet. Darum gilt:
+
+- Originalbuecher, reMarkable-Exports, generierte PDFs/EPUBs,
+  `*.extract.json`, `*.review.json`, `*.unmatched.json` und Notes-Dateien
+  gehoeren nicht in Git.
+- Keine urheberrechtlich geschuetzten Beispieldokumente committen.
+- Keine Secrets, Tokens, privaten Pfade oder persoenlichen Notizen committen.
+- Fuer neue Codeaenderungen immer Tests ergaenzen oder bestehende Tests
+  ausfuehren.
+- Bei EPUB immer ZIP-/Pfadnamen als untrusted behandeln.
+- Bei neuen GitHub-Actions minimale Berechtigungen setzen (`permissions`).
+
 ## Wichtige Formatregeln
 
 ### Wenn das Original ein PDF ist

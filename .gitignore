@@ -1,6 +1,16 @@
 __pycache__/
 *.pyc
 .DS_Store
+.env
+.env.*
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+*.log
 TASK.md
 
 # Local helper outputs

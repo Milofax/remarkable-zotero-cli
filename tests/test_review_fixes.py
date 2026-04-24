@@ -170,6 +170,46 @@ class ReviewFixTests(unittest.TestCase):
         finally:
             doc.close()
 
+    def test_line_quads_merge_words_on_same_pdf_line(self):
+        words = [
+            (10.0, 20.0, 30.0, 30.0, "Option", 1, 2, 0),
+            (34.0, 20.0, 50.0, 30.0, "class", 1, 2, 1),
+            (55.0, 20.0, 80.0, 30.0, "means", 1, 2, 2),
+        ]
+
+        quads = rmha._line_quads_from_word_hits(words)
+
+        self.assertEqual(len(quads), 1)
+        self.assertEqual(quads[0].ul.x, 10.0)
+        self.assertEqual(quads[0].ur.x, 80.0)
+        self.assertEqual(quads[0].ul.y, 20.0)
+        self.assertEqual(quads[0].ll.y, 30.0)
+
+    def test_line_quads_keep_single_word_highlights_precise(self):
+        words = [
+            (10.0, 20.0, 42.0, 30.0, "volatility", 1, 2, 0),
+        ]
+
+        quads = rmha._line_quads_from_word_hits(words)
+
+        self.assertEqual(len(quads), 1)
+        self.assertEqual(quads[0].ul.x, 10.0)
+        self.assertEqual(quads[0].ur.x, 42.0)
+
+    def test_line_quads_split_large_gaps_and_different_lines(self):
+        words = [
+            (10.0, 20.0, 30.0, 30.0, "left", 1, 2, 0),
+            (120.0, 20.0, 150.0, 30.0, "right", 1, 2, 1),
+            (10.0, 40.0, 40.0, 50.0, "next", 1, 3, 0),
+        ]
+
+        quads = rmha._line_quads_from_word_hits(words)
+
+        self.assertEqual(len(quads), 3)
+        self.assertEqual(quads[0].ul.x, 10.0)
+        self.assertEqual(quads[1].ul.x, 120.0)
+        self.assertEqual(quads[2].ul.y, 40.0)
+
     def test_pdf_context_refine_drops_leading_context_words(self):
         page_text = rmha.normalize_for_match(
             "All models achieve the same end: the option's theoretical value. "

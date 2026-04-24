@@ -1591,15 +1591,42 @@ def _build_pdf_page_state(page):
     return "".join(page_text_parts), word_spans
 
 
-def _quads_from_word_hits(hit_words):
+def _line_quads_from_word_hits(hit_words):
+    if not hit_words:
+        return []
+
+    runs = []
+    current = None
+    for word_info in hit_words:
+        block_line = (word_info[5], word_info[6]) if len(word_info) > 6 else (None, None)
+        word_rect = fitz.Rect(word_info[:4])
+        if current is None:
+            current = {"block_line": block_line, "rect": word_rect}
+            continue
+
+        current_rect = current["rect"]
+        line_height = max(current_rect.y1 - current_rect.y0, word_rect.y1 - word_rect.y0)
+        gap = word_rect.x0 - current_rect.x1
+        same_visual_line = (
+            block_line == current["block_line"]
+            and gap <= max(line_height * 2.5, 18.0)
+        )
+        if same_visual_line:
+            current["rect"] |= word_rect
+        else:
+            runs.append(current["rect"])
+            current = {"block_line": block_line, "rect": word_rect}
+    if current is not None:
+        runs.append(current["rect"])
+
     return [
         fitz.Quad(
-            fitz.Point(word_info[0], word_info[1]),
-            fitz.Point(word_info[2], word_info[1]),
-            fitz.Point(word_info[0], word_info[3]),
-            fitz.Point(word_info[2], word_info[3]),
+            fitz.Point(rect.x0, rect.y0),
+            fitz.Point(rect.x1, rect.y0),
+            fitz.Point(rect.x0, rect.y1),
+            fitz.Point(rect.x1, rect.y1),
         )
-        for word_info in hit_words
+        for rect in runs
     ]
 
 
@@ -1732,7 +1759,7 @@ def _search_text_in_pdf(doc, repaired_text: str, raw_text: str,
         ]
         if not hit_words:
             continue
-        quads = _quads_from_word_hits(hit_words)
+        quads = _line_quads_from_word_hits(hit_words)
         matched_word_text = _join_pdf_word_text(hit_words)
 
         if best_match is None or match.score > best_match.score:

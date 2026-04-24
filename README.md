@@ -31,6 +31,12 @@ Genau dafuer ist das Skript da.
 - Bild-/Flaechenmarkierungen werden als PDF-Rechtecke geschrieben
 - wo Zotero es fuer den Import braucht, setzt das Skript kompatible
   Annotation-Keys auf die einzelnen PDF-Annotationsobjekte
+- reMarkable-Farbmarkierungen werden aus den tatsaechlichen Export-Farbwerten
+  erkannt; unterstuetzt sind aktuell gelb, gruen, pink, orange sowie einfache
+  Fallbacks fuer blau/rot
+- wenn reMarkable mehrere getrennte Markerbalken in einem PDF-Drawing-Pfad
+  speichert, werden diese in echte Teilrechtecke zerlegt, damit unmarkierter
+  Text dazwischen nicht versehentlich mitannotiert wird
 
 ### Wenn das Original ein EPUB ist
 
@@ -39,6 +45,10 @@ Genau dafuer ist das Skript da.
 - zusaetzlich wird `META-INF/calibre_bookmarks.txt` erzeugt, damit Zotero die
   E-Book-Anmerkungen ueber den Calibre-/KOReader-Importpfad lesen kann
 - als Fallback entsteht immer auch `*.annotated.notes.md`
+- Textmarkierungen profitieren von derselben reMarkable-PDF-Extraktion wie PDF
+- Bild-/Grafikmarkierungen koennen bei EPUB nicht als echte seitenbasierte
+  Zotero-Image-Annotations rekonstruiert werden, weil EPUB reflowable ist und
+  keine stabile PDF-Seitengeometrie besitzt
 
 ## Harte Regel fuer EPUB
 
@@ -133,6 +143,9 @@ Wichtig:
 - Bei `EPUB` reicht `status = final` allein nicht als Vertrauenssignal.
 - Danach sollte man gezielt noch die tatsaechlichen Textgrenzen einzelner
   Highlights gegen das Original pruefen.
+- Bei `PDF` sollte man nach groesseren Aenderungen oder bei neuen Dokumenttypen
+  ebenfalls Beispielseiten rendern und visuell gegen die reMarkable-PDF
+  pruefen, besonders fuer kurze Highlights und Bild-/Flaechenmarkierungen.
 
 ## Review-Workflow
 
@@ -154,6 +167,35 @@ Die Regel dabei:
 - OCR-/Ligatur-Schaeden nur dann korrigieren, wenn der exakte Zieltext im
   Original belegbar ist
 - lieber offen lassen als falsch setzen
+
+## Bild- und Grafikmarkierungen
+
+### PDF
+
+Bei PDF kann das Skript Bild-, Grafik- oder Flaechenmarkierungen grundsaetzlich
+erhalten, weil Original-PDF und reMarkable-Export beide eine feste
+Seitengeometrie haben.
+
+- Texttreffer werden als echte Highlight-Annotations geschrieben.
+- Flaechen ohne getroffene Textwoerter werden als PDF-Rechteckannotation
+  geschrieben.
+- Kleine Farbnaehte zwischen ueberlappenden Markierungen werden verworfen,
+  damit daraus keine falschen Bildannotations entstehen.
+- Ergebnis muss visuell geprueft werden, besonders bei Diagrammen, Tabellen,
+  Marginalien und sehr kurzen Markierungen.
+
+### EPUB
+
+Bei EPUB gibt es keine verlaessliche 1:1-Seitenposition fuer Grafikstellen aus
+einer reMarkable-PDF. Darum gilt:
+
+- Textmarkierungen werden in den EPUB-Text uebertragen.
+- Echte Bild-/Grafikmarkierungen werden nicht als echte Zotero-Image-
+  Annotation an derselben visuellen Stelle garantiert.
+- Wenn eine Grafikmarkierung wichtig ist, muss sie im Review explizit geprueft
+  und ggf. als Fallback-Notiz dokumentiert werden.
+- `*.annotated.notes.md` ist hier der Sicherheitsanker, falls Zotero/EPUB die
+  Annotation nicht nativ genug abbilden kann.
 
 ## Tests
 

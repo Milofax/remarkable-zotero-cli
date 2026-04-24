@@ -42,6 +42,11 @@ fehlerfreien Import in Zotero aktuell noetig sind.
 - Bild-/Flaechenhighlights werden als PDF-Rechteckannotation geschrieben
 - wenn fuer den Zotero-Import noetig, duerfen an einzelnen PDF-Annotations-
   objekten Zotero-kompatible Keys gesetzt werden
+- reMarkable-Farben muessen aus den Export-Farbwerten erkannt werden; nicht
+  annehmen, dass jedes Dokument dieselben RGB-Werte nutzt
+- wenn reMarkable mehrere getrennte Markerbalken in einem Drawing-Pfad
+  speichert, muessen die echten Teilrechtecke verwendet werden, nicht nur die
+  grosse Bounding-Box
 
 ### Wenn das Original ein EPUB ist
 
@@ -59,6 +64,40 @@ fehlerfreien Import in Zotero aktuell noetig sind.
   nicht als ein einziger sauberer Textlauf existiert, darf sie in mehrere
   exakte EPUB-Highlights aufgeteilt werden, solange der sichtbar markierte
   Text in Summe genau dem reMarkable-Inhalt entspricht
+- Bild-/Grafikmarkierungen aus der reMarkable-PDF koennen bei EPUB nicht als
+  echte seitenbasierte Zotero-Image-Annotations an derselben visuellen Stelle
+  garantiert werden; dafuer muss mindestens der Markdown-Fallback bzw. ein
+  expliziter Review-Hinweis entstehen
+
+## Bild- und Grafikmarkierungen
+
+### PDF
+
+Bei PDF sind Bild-, Grafik- und Flaechenmarkierungen grundsaetzlich
+uebertragbar, weil Original-PDF und reMarkable-Export feste Seitenkoordinaten
+haben.
+
+- Wenn eine farbige Flaeche Textwoerter trifft, wird daraus ein Text-Highlight.
+- Wenn eine farbige Flaeche keine Textwoerter trifft und gross genug ist, wird
+  daraus eine PDF-Rechteckannotation.
+- Winzige Farbnaehte oder Ueberlappungsreste duerfen nicht als Bildannotation
+  ausgegeben werden.
+- Bei Diagrammen, Tabellen, Marginalien und kurzen Markierungen muessen
+  Beispielseiten gerendert und visuell gegen die reMarkable-PDF geprueft
+  werden.
+
+### EPUB
+
+Bei EPUB gibt es keine stabile 1:1-Seitengeometrie fuer Grafikstellen aus der
+reMarkable-PDF.
+
+- Textmarkierungen werden in den EPUB-Text uebertragen.
+- Echte Bild-/Grafikmarkierungen sind nicht als echte Zotero-Image-Annotation
+  an derselben visuellen Stelle garantiert.
+- Wenn eine solche Markierung wichtig ist, muss sie als echter Review-Fall
+  behandelt und im Fallback dokumentiert werden.
+- Nicht behaupten, EPUB-Bildmarkierungen seien gleichwertig zu PDF-
+  Rechteckannotations.
 
 ## Lokaler Einstiegspunkt
 
@@ -97,6 +136,9 @@ Sobald die Dateien klar sind:
 6. Bei `EPUB` reicht `review.json` allein nicht als Abschlusskriterium:
    pruefe danach zusaetzlich stichprobenartig bzw. gezielt die tatsaechlich
    markierten Textgrenzen gegen den Originaltext.
+7. Bei `PDF` reicht `review.json` bei neuen Dokumenttypen ebenfalls nicht als
+   einziges Vertrauenssignal: rendere relevante Beispielseiten und pruefe
+   Farben, kurze Markierungen und Bild-/Flaechenmarkierungen visuell.
 
 ## Review-Regeln
 
@@ -106,6 +148,9 @@ Sobald die Dateien klar sind:
 - `status = needs_review` bedeutet: nicht aufhoeren, sondern weiterpruefen
 - bei `EPUB` ist nach `status = final` trotzdem noch zu pruefen, ob die
   markierten Textgrenzen exakt stimmen
+- bei `PDF` ist nach groesseren Aenderungen oder bei neuen Dokumenten visuell
+  gegen die reMarkable-PDF zu pruefen, besonders bei Grafik-/Flaechen-
+  markierungen und sehr kurzen Texttreffern
 - wenn noetig, zuerst voll extrahieren:
 
 ```bash

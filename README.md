@@ -48,6 +48,9 @@ Es gilt:
 - Nicht weniger Text.
 - Fussnotenmarker und Superscript-Ziffern nur dann, wenn sie im
   reMarkable-Highlight wirklich dabei waren.
+- Ueberlappende Farbwechsel werden in getrennte EPUB-Segmente zerlegt. Ein
+  gruener Begriff innerhalb einer gelben Passage darf also nicht zusaetzlich
+  als gelb verschachtelt markiert werden.
 
 Wenn ein Highlight im EPUB wegen Markup, Fussnote oder Split ueber mehrere
 Textlaeufe verteilt ist, darf das Ergebnis intern in mehrere exakte

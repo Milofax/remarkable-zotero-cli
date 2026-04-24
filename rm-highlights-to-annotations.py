@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import io
 import json
 import os
@@ -107,12 +108,21 @@ CSS_HIGHLIGHT_STYLE = {
 }
 
 LINE_GAP_TOLERANCE = 8.0
+# A reMarkable export highlight often covers only the lower part of a glyph box.
+# 0.15 keeps those partial hits while still rejecting most neighboring words.
+# See tests for footnote-adjacent / partial-overlap edge cases.
 WORD_HIT_OVERLAP_THRESHOLD = 0.15
+# Highlights with the same color but a gap of 4+ words should be treated as
+# separate passages. This avoids merging nearby snippets like a sentence and a
+# later quote in the same paragraph.
 WORD_GROUP_GAP_THRESHOLD = 3
 CONTEXT_WINDOW = 160
 MATCH_SCORE_THRESHOLD = 0.58
 CONFIDENT_MATCH_SCORE = 0.86
 MAX_MATCHES_PER_METHOD = 8
+BACKTRACK_CONTAINER_PENALTY = 0.06
+BACKTRACK_OFFSET_PENALTY = 0.03
+FORWARD_ORDER_BONUS = 0.02
 
 
 # ============================================================
@@ -695,6 +705,34 @@ class TextMatch:
     method: str
 
 
+@dataclass
+class MatchFailure:
+    reason: str
+    candidate_count: int = 0
+    best_score: Optional[float] = None
+    best_method: Optional[str] = None
+
+
+def _build_unmatched_entry(highlight: Highlight,
+                           failure: Optional[MatchFailure] = None) -> dict:
+    entry = {
+        "color": highlight.color,
+        "rm_page": highlight.rm_page + 1,
+        "raw_text": highlight.raw_text,
+        "repaired_text": highlight.text,
+        "context_before": highlight.context_before,
+        "context_after": highlight.context_after,
+        "reason": failure.reason if failure else "unknown",
+    }
+    if failure and failure.candidate_count:
+        entry["candidate_count"] = failure.candidate_count
+    if failure and failure.best_score is not None:
+        entry["best_score"] = round(failure.best_score, 3)
+    if failure and failure.best_method:
+        entry["best_method"] = failure.best_method
+    return entry
+
+
 def _iter_literal_spans(text: str, needle: str,
                         max_matches: int = MAX_MATCHES_PER_METHOD):
     if not text or not needle:
@@ -851,11 +889,13 @@ def _score_match_window(container_text: str, start: int, end: int,
     if last_location is not None:
         last_container, last_start = last_location
         if container_index < last_container:
-            order_score -= 0.18
+            # Readers do not necessarily annotate in document order, so this
+            # is only a soft preference, not a hard anti-backtracking bias.
+            order_score -= BACKTRACK_CONTAINER_PENALTY
         elif container_index == last_container and start < last_start:
-            order_score -= 0.08
+            order_score -= BACKTRACK_OFFSET_PENALTY
         else:
-            order_score += 0.04
+            order_score += FORWARD_ORDER_BONUS
 
     method_bonus = {
         "exact": 0.14,
@@ -931,23 +971,52 @@ def _find_best_text_match(container_text: str, container_index: int,
                           hint_index: int,
                           last_location: Optional[tuple[int, int]],
                           substitutions: dict) -> Optional[TextMatch]:
+    match, _failure = _find_best_text_match_with_reason(
+        container_text,
+        container_index,
+        repaired_text,
+        raw_text,
+        context_before,
+        context_after,
+        hint_index,
+        last_location,
+        substitutions,
+    )
+    return match
+
+
+def _find_best_text_match_with_reason(container_text: str, container_index: int,
+                                      repaired_text: str, raw_text: str,
+                                      context_before: str, context_after: str,
+                                      hint_index: int,
+                                      last_location: Optional[tuple[int, int]],
+                                      substitutions: dict) -> tuple[Optional[TextMatch], Optional[MatchFailure]]:
     target_norm = normalize_for_match(repaired_text or raw_text)
     has_strong_context = (
         len(normalize_for_match(context_before)) >= 24
         or len(normalize_for_match(context_after)) >= 24
     )
     if len(target_norm) < 4 and not has_strong_context:
-        return None
+        return None, MatchFailure(reason="context_too_short")
+
+    candidates = list(_build_candidate_windows(
+        container_text, repaired_text, raw_text, substitutions
+    ))
+    if not candidates:
+        return None, MatchFailure(reason="no_candidate_windows")
 
     best_match = None
-    for start, end, method in _build_candidate_windows(
-        container_text, repaired_text, raw_text, substitutions
-    ):
+    best_rejected_score = None
+    best_rejected_method = None
+    for start, end, method in candidates:
         score = _score_match_window(
             container_text, start, end, target_norm,
             context_before, context_after,
             container_index, hint_index, last_location, method)
         if score < MATCH_SCORE_THRESHOLD:
+            if best_rejected_score is None or score > best_rejected_score:
+                best_rejected_score = score
+                best_rejected_method = method
             continue
         match = TextMatch(
             container_index=container_index,
@@ -959,7 +1028,14 @@ def _find_best_text_match(container_text: str, container_index: int,
         )
         if best_match is None or match.score > best_match.score:
             best_match = match
-    return best_match
+    if best_match is not None:
+        return best_match, None
+    return None, MatchFailure(
+        reason="no_fuzzy_match",
+        candidate_count=len(candidates),
+        best_score=best_rejected_score,
+        best_method=best_rejected_method,
+    )
 
 
 def _broken_output_score(text: str) -> int:
@@ -1286,7 +1362,7 @@ def annotate_pdf(original_pdf: str, highlights: list[Highlight],
     doc = fitz.open(original_pdf)
     stats = {"text_matched": 0, "text_unmatched": 0,
              "image_placed": 0, "image_skipped": 0}
-    unmatched_highlights = []
+    unmatched_entries = []
     page_cache = {}
     last_match_location = None
 
@@ -1306,14 +1382,24 @@ def annotate_pdf(original_pdf: str, highlights: list[Highlight],
                                content=f"[Bild-Highlight {hl.color}]")
                 annot.set_opacity(0.5)
                 annot.update()
-                _assign_zotero_annotation_id(doc, annot)
+                _assign_zotero_annotation_id(
+                    doc,
+                    annot,
+                    key_source={
+                        "kind": "image",
+                        "page_index": page.number,
+                        "color": hl.color,
+                        "text": "",
+                        "geometry": _rect_geometry_key(rect),
+                    },
+                )
                 stats["image_placed"] += 1
             else:
                 stats["image_skipped"] += 1
             continue
 
         # Text-Highlight: suche im Original-PDF
-        quads, page, matched_text, last_match_location = _search_text_in_pdf(
+        quads, page, matched_text, last_match_location, match_failure = _search_text_in_pdf(
             doc, hl.text, hl.raw_text, hl.context_before, hl.context_after,
             substitutions, hint_page=hl.rm_page,
             last_location=last_match_location, page_cache=page_cache)
@@ -1324,29 +1410,28 @@ def annotate_pdf(original_pdf: str, highlights: list[Highlight],
             annot.set_info(title="Remarkable Import",
                            content=output_text)
             annot.update()
-            _assign_zotero_annotation_id(doc, annot)
+            _assign_zotero_annotation_id(
+                doc,
+                annot,
+                key_source={
+                    "kind": "text",
+                    "page_index": page.number,
+                    "color": hl.color,
+                    "text": output_text,
+                    "geometry": _quad_geometry_key(quads),
+                },
+            )
             stats["text_matched"] += 1
         else:
             stats["text_unmatched"] += 1
-            unmatched_highlights.append(hl)
+            unmatched_entries.append(_build_unmatched_entry(hl, match_failure))
 
     doc.save(output_path, garbage=3, deflate=True)
     doc.close()
 
-    if unmatched_out and unmatched_highlights:
-        unmatched_data = [
-            {
-                "color": h.color,
-                "rm_page": h.rm_page + 1,
-                "raw_text": h.raw_text,
-                "repaired_text": h.text,
-                "context_before": h.context_before,
-                "context_after": h.context_after,
-            }
-            for h in unmatched_highlights
-        ]
+    if unmatched_out and unmatched_entries:
         with open(unmatched_out, "w", encoding="utf-8") as f:
-            json.dump(unmatched_data, f, indent=2, ensure_ascii=False)
+            json.dump(unmatched_entries, f, indent=2, ensure_ascii=False)
     elif unmatched_out and os.path.exists(unmatched_out):
         os.remove(unmatched_out)
 
@@ -1354,19 +1439,40 @@ def annotate_pdf(original_pdf: str, highlights: list[Highlight],
         print(f"  PDF Output: {stats['text_matched']} Text-Annotations, "
               f"{stats['image_placed']} Bild-Annotations, "
               f"{stats['text_unmatched']} nicht gefunden")
-        if unmatched_out and unmatched_highlights:
+        if unmatched_out and unmatched_entries:
             print(f"  Unmatched-Kontext: {unmatched_out} "
-                  f"({len(unmatched_highlights)} Einträge — für Review)")
+                  f"({len(unmatched_entries)} Einträge — für Review)")
     return stats
 
 
-def _assign_zotero_annotation_id(doc, annot):
+def _quad_geometry_key(quads):
+    geometry = []
+    for quad in quads:
+        geometry.append([
+            round(quad.ul.x, 2), round(quad.ul.y, 2),
+            round(quad.ur.x, 2), round(quad.ur.y, 2),
+            round(quad.ll.x, 2), round(quad.ll.y, 2),
+            round(quad.lr.x, 2), round(quad.lr.y, 2),
+        ])
+    return geometry
+
+
+def _rect_geometry_key(rect: fitz.Rect):
+    return [round(rect.x0, 2), round(rect.y0, 2), round(rect.x1, 2), round(rect.y1, 2)]
+
+
+def _stable_annotation_key(key_source: dict) -> str:
+    payload = json.dumps(key_source, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+
+def _assign_zotero_annotation_id(doc, annot, key_source: Optional[dict] = None):
     """Give the PDF annotation a Zotero-compatible ID.
 
     Zotero's PDF worker treats square/image, ink, and free-text annotations as
     importable only when they carry a Zotero-style key in /NM or /Zotero:Key.
     """
-    key = uuid.uuid4().hex
+    key = _stable_annotation_key(key_source) if key_source else uuid.uuid4().hex
     doc.xref_set_key(annot.xref, "NM", f"(Zotero-{key})")
     doc.xref_set_key(annot.xref, "Zotero:Key", f"({key})")
     return key
@@ -1416,7 +1522,7 @@ def _search_text_in_pdf(doc, repaired_text: str, raw_text: str,
                         page_cache: Optional[dict] = None):
     target_norm = normalize_for_match(repaired_text or raw_text)
     if len(target_norm) < 4:
-        return None, None, "", last_location
+        return None, None, "", last_location, MatchFailure(reason="context_too_short")
 
     page_order = list(range(max(0, hint_page - 3), min(doc.page_count, hint_page + 4)))
     page_order += [i for i in range(doc.page_count) if i not in page_order]
@@ -1424,6 +1530,7 @@ def _search_text_in_pdf(doc, repaired_text: str, raw_text: str,
     best_match = None
     best_page = None
     best_quads = None
+    best_failure = None
 
     for pi in page_order:
         page = doc[pi]
@@ -1436,11 +1543,26 @@ def _search_text_in_pdf(doc, repaired_text: str, raw_text: str,
         if not page_text:
             continue
 
-        match = _find_best_text_match(
+        match, failure = _find_best_text_match_with_reason(
             page_text, pi, repaired_text, raw_text,
             context_before, context_after,
             hint_page, last_location, substitutions)
         if match is None:
+            if failure is not None and (
+                best_failure is None
+                or (
+                    failure.best_score is not None
+                    and (
+                        best_failure.best_score is None
+                        or failure.best_score > best_failure.best_score
+                    )
+                )
+                or (
+                    best_failure.reason == "no_candidate_windows"
+                    and failure.reason != "no_candidate_windows"
+                )
+            ):
+                best_failure = failure
             continue
 
         hit_words = [
@@ -1459,13 +1581,14 @@ def _search_text_in_pdf(doc, repaired_text: str, raw_text: str,
                 break
 
     if best_match is None or best_page is None or best_quads is None:
-        return None, None, "", last_location
+        return None, None, "", last_location, best_failure
 
     return (
         best_quads,
         best_page,
         best_match.matched_text,
         (best_match.container_index, best_match.start),
+        None,
     )
 
 
@@ -1985,7 +2108,7 @@ def annotate_epub(original_epub: str, highlights: list[Highlight],
     AI-Review).
     """
     stats = {"matched": 0, "unmatched": 0, "image_listed": 0}
-    unmatched_highlights = []
+    unmatched_entries = []
     notes_entries = []
 
     # Read EPUB into memory
@@ -2058,7 +2181,9 @@ def annotate_epub(original_epub: str, highlights: list[Highlight],
         )
         if not hl.raw_text and not hl.text:
             stats["unmatched"] += 1
-            unmatched_highlights.append(hl)
+            unmatched_entries.append(
+                _build_unmatched_entry(hl, MatchFailure(reason="empty_highlight_text"))
+            )
             notes_entries.append({
                 "section": f"Remarkable p.{hl.rm_page + 1}",
                 "location": "nicht sicher zugeordnet",
@@ -2073,7 +2198,9 @@ def annotate_epub(original_epub: str, highlights: list[Highlight],
         # wenn genügend Kontext aus dem Remarkable-Export vorliegt.
         if len(hl.text) < 4 and len(hl.raw_text) < 4 and not has_strong_context:
             stats["unmatched"] += 1
-            unmatched_highlights.append(hl)
+            unmatched_entries.append(
+                _build_unmatched_entry(hl, MatchFailure(reason="context_too_short"))
+            )
             notes_entries.append({
                 "section": f"Remarkable p.{hl.rm_page + 1}",
                 "location": "nicht sicher zugeordnet",
@@ -2098,11 +2225,12 @@ def annotate_epub(original_epub: str, highlights: list[Highlight],
 
         best_state = None
         best_match = None
+        best_failure = None
         for si in order:
             state = get_state(si)
             if not state.norm_text:
                 continue
-            match = _find_best_text_match(
+            match, failure = _find_best_text_match_with_reason(
                 state.norm_text,
                 si,
                 hl.text,
@@ -2114,6 +2242,21 @@ def annotate_epub(original_epub: str, highlights: list[Highlight],
                 substitutions,
             )
             if match is None:
+                if failure is not None and (
+                    best_failure is None
+                    or (
+                        failure.best_score is not None
+                        and (
+                            best_failure.best_score is None
+                            or failure.best_score > best_failure.best_score
+                        )
+                    )
+                    or (
+                        best_failure.reason == "no_candidate_windows"
+                        and failure.reason != "no_candidate_windows"
+                    )
+                ):
+                    best_failure = failure
                 continue
             if best_match is None or match.score > best_match.score:
                 best_state = state
@@ -2123,7 +2266,7 @@ def annotate_epub(original_epub: str, highlights: list[Highlight],
 
         if best_state is None or best_match is None:
             stats["unmatched"] += 1
-            unmatched_highlights.append(hl)
+            unmatched_entries.append(_build_unmatched_entry(hl, best_failure))
             notes_entries.append({
                 "section": f"Remarkable p.{hl.rm_page + 1}",
                 "location": "nicht sicher zugeordnet",
@@ -2271,20 +2414,9 @@ def annotate_epub(original_epub: str, highlights: list[Highlight],
             zout.writestr(info, data)
 
     # Optional: schreibe unmatched als JSON (für AI/manuelles Review)
-    if unmatched_out and unmatched_highlights:
-        unmatched_data = [
-            {
-                "color": h.color,
-                "rm_page": h.rm_page + 1,
-                "raw_text": h.raw_text,
-                "repaired_text": h.text,
-                "context_before": h.context_before,
-                "context_after": h.context_after,
-            }
-            for h in unmatched_highlights
-        ]
+    if unmatched_out and unmatched_entries:
         with open(unmatched_out, "w", encoding="utf-8") as f:
-            json.dump(unmatched_data, f, indent=2, ensure_ascii=False)
+            json.dump(unmatched_entries, f, indent=2, ensure_ascii=False)
     elif unmatched_out and os.path.exists(unmatched_out):
         os.remove(unmatched_out)
 
@@ -2305,9 +2437,9 @@ def annotate_epub(original_epub: str, highlights: list[Highlight],
         if bookmarks:
             print(f"  META-INF/calibre_bookmarks.txt: {len(bookmarks)} Einträge "
                   f"(Zotero: Rechtsklick → Datei → 'E-Book-Anmerkungen importieren…')")
-        if unmatched_out and unmatched_highlights:
+        if unmatched_out and unmatched_entries:
             print(f"  Unmatched-Kontext: {unmatched_out} "
-                  f"({len(unmatched_highlights)} Einträge — für Review)")
+                  f"({len(unmatched_entries)} Einträge — für Review)")
         if notes_out:
             print(f"  Markdown-Fallback: {notes_out}")
     return stats
@@ -2487,7 +2619,7 @@ def _write_review_bundle(review_path: Path, original: Path, remarkable: Path,
             unmatched_entries = json.load(f)
 
     unresolved_entries = [
-        {"word": word, "context": context}
+        {"word": word, "context": context, "reason": "ligature_unresolved"}
         for word, context in unresolved
     ]
     review_bundle = {

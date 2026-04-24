@@ -107,6 +107,13 @@ Je nach Lauf entstehen:
 - bei EPUB zusaetzlich `*.annotated.notes.md`
 - falls noch etwas offen bleibt: `*.annotated.unmatched.json`
 
+In `*.annotated.unmatched.json` stehen jetzt auch Reason-Codes wie:
+
+- `empty_highlight_text`
+- `context_too_short`
+- `no_candidate_windows`
+- `no_fuzzy_match`
+
 ## Der Review-Schritt ist Pflicht
 
 `*.annotated.review.json` ist das Pflicht-Artefakt.
@@ -140,6 +147,12 @@ Die Regel dabei:
 - OCR-/Ligatur-Schaeden nur dann korrigieren, wenn der exakte Zieltext im
   Original belegbar ist
 - lieber offen lassen als falsch setzen
+
+## Tests
+
+```bash
+python3 -m unittest discover -s tests -v
+```
 
 ## Zotero-Import
 

@@ -1,0 +1,28 @@
+__pycache__/
+*.pyc
+.DS_Store
+
+# Local helper outputs
+tmp/
+*.notes.md
+*.review.json
+*.unmatched.json
+*.extract.json
+*.reviewed.extract.json
+
+# Generated annotated artifacts
+*.annotated.epub
+*.annotated.pdf
+
+# Local sample/source documents
+*.backup.pdf
+* Original.pdf
+*.epub
+*.pdf
+
+# Keep the actual project files tracked
+!requirements.txt
+!README.md
+!CODEX_REMARKABLE_ZOTERO.md
+!rm-highlights-to-annotations.py
+!remarkable-zotero

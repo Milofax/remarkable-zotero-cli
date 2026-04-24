@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .DS_Store
+TASK.md
 
 # Local helper outputs
 tmp/

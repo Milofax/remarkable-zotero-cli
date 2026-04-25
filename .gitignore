@@ -13,6 +13,12 @@ dist/
 *.log
 TASK.md
 
+# Local conversion workspace. The directory and its README are tracked, but all
+# user documents and generated artifacts inside it stay private.
+WORK/*
+!WORK/
+!WORK/README.md
+
 # Local helper outputs
 tmp/
 *.notes.md

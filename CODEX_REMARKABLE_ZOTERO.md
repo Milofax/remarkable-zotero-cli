@@ -37,6 +37,9 @@ fehlerfreien Import in Zotero aktuell noetig sind.
 
 Dieses Repo ist fuer oeffentliche Nutzung vorbereitet. Darum gilt:
 
+- Eingabedateien fuer Konvertierungen liegen ausschliesslich in `WORK/`.
+- Suche fuer neue Konvertierungen nur in `WORK/`, nicht im Repo-Root und nicht
+  in anderen lokalen Ordnern, ausser der User gibt explizit absolute Pfade an.
 - Originalbuecher, reMarkable-Exports, generierte PDFs/EPUBs,
   `*.extract.json`, `*.review.json`, `*.unmatched.json` und Notes-Dateien
   gehoeren nicht in Git.
@@ -127,15 +130,35 @@ Arbeitsverzeichnis:
 /Volumes/DATEN/Coding/remarkable-zotero-cli
 ```
 
+Standard-Arbeitsordner fuer alle Eingabedateien:
+
+```bash
+/Volumes/DATEN/Coding/remarkable-zotero-cli/WORK
+```
+
+Wichtig:
+
+- Suche zukuenftig nur in `WORK/` nach Originaldatei und reMarkable-Export.
+- Wenn `WORK/` keine eindeutige Originaldatei und keine eindeutige
+  reMarkable-Export-PDF enthaelt, frage nach.
+- Lege erzeugte Outputs bevorzugt ebenfalls in `WORK/` ab.
+- Ignoriere PDFs/EPUBs im Repo-Root; dort sollen keine Arbeitsdateien mehr
+  liegen.
+
 ## Was du zuerst tun sollst
 
-Wenn ich die Dateipfade noch nicht genannt habe, frage mich in einer einzigen
-kurzen Nachricht nach genau diesen zwei Dateien:
+Wenn ich die Dateipfade noch nicht genannt habe, pruefe zuerst ausschliesslich
+`WORK/`.
+
+Wenn dort genau ein plausibles Paar liegt, verwende dieses Paar.
+
+Wenn dort mehrere Kandidaten oder kein eindeutiges Paar liegen, frage mich in
+einer einzigen kurzen Nachricht nach genau diesen zwei Dateien:
 
 1. Welche Originaldatei soll verwendet werden?
 2. Welche zugehoerige reMarkable-Export-PDF soll verwendet werden?
 
-Nicht raten.
+Nicht ausserhalb von `WORK/` suchen und nicht raten.
 
 ## Danach
 
